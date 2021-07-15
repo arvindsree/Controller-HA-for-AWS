@@ -1,0 +1,38 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Invokes lambda to create necessary ASGs, LCs and setup HA",
+    "Metadata" :
+  {
+    "AWS::CloudFormation::Interface" :
+    {
+      "ParameterGroups" :
+      [
+        {
+          "Label" : { "default":"Aviatrix Controller HA Lambda configuration" },
+          "Parameters" : [ "AviatrixLambdaARN"]
+        }
+      ],
+      "ParameterLabels" :
+      {
+         "AviatrixLambdaARN" : { "default" : "EARN of the lambda to be invoked to setup HA" }
+      }
+    }
+  },
+  "Parameters":
+  {
+     "AviatrixLambdaARN":
+      {
+        "Type": "String",
+        "Description": "ARN of the lambda to be invoked to setup HA"
+      }
+  },
+  "Resources" :
+  {
+    "SetupHA": {
+      "Type": "Custom::SetupHA",
+      "Properties": {
+        "ServiceToken": { "Ref" : "AviatrixLambdaARN" }
+      }
+    }
+  }
+}

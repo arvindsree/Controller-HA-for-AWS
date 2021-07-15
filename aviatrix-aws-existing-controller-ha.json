@@ -180,12 +180,14 @@
           "Timeout" : "900"
        }
     },
-    "SetupHA": {
-      "Type": "Custom::SetupHA",
-      "Properties": {
-        "ServiceToken": { "Fn::GetAtt" : ["AviatrixLambda", "Arn"] }
-      }
-    }
+	"CFTInvokeLambda": {
+		"Type": "AWS::CloudFormation::Stack",
+		"DependsOn" : "AviatrixLambda",
+		"Properties": {
+			"TemplateURL": "https://aviatrix-cloudformation-templates.s3-us-west-2.amazonaws.com/aws-controller-ha-invoke-lambda.json",
+			"Parameters" : {"AviatrixLambdaARN" : { "Fn::GetAtt" : ["AviatrixLambda", "Arn"] }}
+		}
+	}
   },
   "Outputs" :
   {
@@ -199,6 +201,5 @@
       "Description": "SUBNET_LIST",
       "Value" : {"Fn::Join": [",", { "Ref": "SubnetParam" }]}
     }
-
   }
 }
