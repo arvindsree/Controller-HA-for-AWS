@@ -6,21 +6,24 @@ import os
 import sys
 import traceback
 import threading
+import zipfile
 import requests
 import boto3
-import zipfile
 from botocore.exceptions import ClientError
 
 sys.path.append("../src")
-from api.external.ami import DEV_FLAG
+from api.external.ami import DEV_FLAG  # pylint: disable=wrong-import-position
 
 try:
     ACCESS_KEY = os.environ['AWS_ACCESS_KEY_ID']
     SECRET_KEY = os.environ['AWS_SECRET_ACCESS_KEY']
     SESSION_TOKEN = os.environ.get('AWS_SESSION_TOKEN')
-except KeyError as err:
+    AWS_GOV_ACCESS_KEY = os.environ['AWS_GOV_ACCESS_KEY']
+    AWS_GOV_SECRET_KEY = os.environ['AWS_GOV_SECRET_KEY']
+    AWS_GOV_SESSION_TOKEN = os.environ.get('AWS_GOV_SESSION_TOKEN')
+except KeyError as err_key:
     raise Exception("use as AWS_ACCESS_KEY_ID=xxxx AWS_SECRET_ACCESS_KEY=yyyy AWS_SESSION_TOKEN=zzz"
-                    " python push_to_s3.py. For dev add --dev") from err
+                    " python push_to_s3.py. For dev add --dev") from err_key
 
 BUCKET_PREFIX = "aviatrix-lambda-"
 LAMBDA_ZIP_FILE = '../bin/aviatrix_ha.zip'
@@ -28,8 +31,12 @@ LAMBDA_ZIP_DEV_FILE_STR = 'aviatrix_ha_dev.zip'
 
 CFT_BUCKET_NAME = "aviatrix-cloudformation-templates"
 CFT_BUCKET_REGION = "us-west-2"
+CFT_GOV_BUCKET_NAME = "aviatrix-cloudformation-templates"
+CFT_GOV_BUCKET_REGION = "us-gov-west-1"
+
 CFT_FILE_NAME = "../cft/aviatrix-aws-existing-controller-ha.json"
 CFT_DEV_FILE_NAME = "aviatrix-aws-existing-controller-ha-dev.json"
+THREADS = []
 
 
 def push_cft_s3():
@@ -44,7 +51,7 @@ def push_cft_s3():
             print("Pushing CFT to dev bucket")
             dev = True
             dst_file = CFT_DEV_FILE_NAME
-            with open(CFT_FILE_NAME) as fileh:
+            with open(CFT_FILE_NAME, encoding='utf-8') as fileh:
                 if LAMBDA_ZIP_DEV_FILE_STR not in fileh.read():
                     raise Exception(LAMBDA_ZIP_DEV_FILE_STR + " not found in lambda in CFT")
             with zipfile.ZipFile(LAMBDA_ZIP_FILE, 'r', zipfile.ZIP_DEFLATED) \
@@ -56,7 +63,7 @@ def push_cft_s3():
     except IndexError:
         pass
     if not dev:
-        with open(CFT_FILE_NAME) as fileh:
+        with open(CFT_FILE_NAME, encoding='utf-8') as fileh:
             if LAMBDA_ZIP_DEV_FILE_STR in fileh.read():
                 raise Exception(LAMBDA_ZIP_DEV_FILE_STR + " found in lambda in CFT. Not pushing")
         with zipfile.ZipFile(LAMBDA_ZIP_FILE, 'r', zipfile.ZIP_DEFLATED) \
@@ -64,19 +71,31 @@ def push_cft_s3():
             if DEV_FLAG in zip_file.namelist():
                 raise Exception(f"Please remove the dev flag file {DEV_FLAG} "
                                 f"in {LAMBDA_ZIP_FILE}")
-
     try:
         s3_.upload_file(CFT_FILE_NAME, CFT_BUCKET_NAME, dst_file,
                         ExtraArgs={'ACL': 'public-read'})
     except ClientError:
         print(traceback.format_exc())
-
+    print('CFT push complete. Pushing in Gov')
+    s3_ = boto3.client('s3', aws_access_key_id=AWS_GOV_ACCESS_KEY,
+                       aws_secret_access_key=AWS_GOV_SECRET_KEY,
+                       region_name=CFT_GOV_BUCKET_REGION, aws_session_token=AWS_GOV_SESSION_TOKEN)
+    try:
+        s3_.upload_file(CFT_FILE_NAME, CFT_BUCKET_NAME, dst_file,
+                        ExtraArgs={'ACL': 'public-read'})
+    except ClientError:
+        print(traceback.format_exc())
     # Validate file push
     url = f'https://{CFT_BUCKET_NAME}.s3.amazonaws.com/{dst_file}'
     try:
         requests.get(url)
-    except Exception:
-        print("Validation failed for CFT")
+    except requests.RequestException as err:
+        print(f"Validation failed for CFT {err}")
+    url = f'https://{CFT_GOV_BUCKET_REGION}.s3.amazonaws.com/{dst_file}'
+    try:
+        requests.get(url)
+    except requests.RequestException as err:
+        print(f"Validation failed for Gov CFT {err}")
     print("Pushed CFT")
 
 
@@ -87,15 +106,31 @@ def push_lambda_file_s3():
     regions = [reg['RegionName'] for reg in ec2_.describe_regions()['Regions']]
 
     for region in regions:
-        print (region)
-        threading.Thread(target=push_lambda_file_in_region, args=[region]).start()
+        print(region)
+        thread = threading.Thread(target=push_lambda_file_in_region, args=[region])
+        thread.start()
+        THREADS.append(thread)
+
+    ec2_ = boto3.client('ec2', aws_access_key_id=AWS_GOV_ACCESS_KEY,
+                        aws_secret_access_key=AWS_GOV_SECRET_KEY,
+                        region_name='us-gov-west-1', aws_session_token=AWS_GOV_SESSION_TOKEN)
+    regions_gov = [reg['RegionName'] for reg in ec2_.describe_regions()['Regions']]
+    # print(regions)
+    for region in regions_gov:
+        print("gov region ", region)
+        thread = threading.Thread(target=push_lambda_file_in_region, args=[region, True])
+        thread.start()
+        THREADS.append(thread)
 
 
-def push_lambda_file_in_region(region):
+def push_lambda_file_in_region(region, gov=False):
     """ Push"""
+    access_key = AWS_GOV_ACCESS_KEY if gov else ACCESS_KEY
+    secret_key = AWS_GOV_SECRET_KEY if gov else SECRET_KEY
+    token = AWS_GOV_SESSION_TOKEN if gov else AWS_GOV_SESSION_TOKEN
     bucket_name = BUCKET_PREFIX + region
-    s3_ = boto3.client('s3', aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY,
-                       region_name=region, aws_session_token=SESSION_TOKEN)
+    s3_ = boto3.client('s3', aws_access_key_id=access_key, aws_secret_access_key=secret_key,
+                       region_name=region, aws_session_token=token)
 
     # # Buckets are already created now
     # try:
@@ -106,6 +141,7 @@ def push_lambda_file_in_region(region):
     #                           CreateBucketConfiguration={'LocationConstraint': region})
     # except ClientError as err:
     #     if "BucketAlreadyOwnedByYou" in str(err):
+    #         print('BucketAlreadyOwned', bucket_name)
     #         pass
     #     else:
     #         print(traceback.format_exc())
@@ -127,11 +163,13 @@ def push_lambda_file_in_region(region):
     url = f'https://{bucket_name}.s3.amazonaws.com/{dst_file}'
     try:
         requests.get(url)
-    except Exception:
-        print("Lambda zip validation failed for %s" % region)
+    except requests.RequestException as err:
+        print(f"Lambda zip validation failed for {region} {err}")
     print("pushed successfully to " + region)
 
 
 if __name__ == '__main__':
     push_cft_s3()
     push_lambda_file_s3()
+    for thread_ in THREADS:
+        thread_.join()
